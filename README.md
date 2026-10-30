@@ -8,24 +8,22 @@ A native **COSMIC™ Desktop Panel Applet** (built with `libcosmic`) for Linux s
 
 ## Features
 
-- **Official Ollama Icon + Active Model Status**: Displays the official Ollama logo + active model name directly on horizontal COSMIC panels (e.g. `lfm3`, `llama3.2:3b`, `lfm3 +1` when multiple models are loaded, `Idle` when 0 models are in memory, or `Offline` if `ollama.service` is stopped). Automatically adapts to icon-only mode on vertical docks/panels.
-- **Opaque Native Popup**: 100% solid COSMIC-themed popup and cards (zero background bleed-through).
-- **Per-Day Token Usage & Live Stream Telemetry**:
+- **Minimalist Icon-Only Panel Indicator**: Displays the symbolic **outline** Ollama icon when idle (`0` models in memory) and automatically switches to a **filled** Ollama icon when one or more models are loaded in VRAM—keeping your COSMIC panel clean with zero text clutter.
+- **Focused, Opaque Native Popup**: 100% solid COSMIC-themed popup and cards (zero background bleed-through) with a lightweight layout that collapses the `LOADED IN MEMORY` section completely when Ollama is idle.
+- **Visual Token Usage & Live Stream Telemetry**:
   - Passively tails `journalctl -u ollama.service -o json` across all apps (`/api/chat`, `/api/generate`, `/v1/chat/completions`, `/v1/messages`).
-  - Displays **Today's Input Tokens** (including KV-cache reuse count), **Output Tokens**, **Total Today**, **Request Count**, and **Live / Last `tok/s`**.
-  - **Daily Usage History (`History`)**: Clean **horizontal stacked bar chart** showing daily **Input** (uncached), **Cached**, and **Output** tokens alongside 7-day & all-time summaries, persisted across reboots and journal rotations in `~/.local/share/cosmic-applet-ollama/token_usage.json` using systemd journal cursors.
-- **One-Click Endpoint Copy**: Click the `Endpoint` footer row (`http://127.0.0.1:11434`) to copy the active Ollama URL directly to the clipboard with instant `Copied!` feedback.
-- **Model Specs & Modelfile Parameters (`/api/ps` + `/api/tags` + `/api/show`)**:
-  - Architecture, parameter count, quantization, and runner (`lfm3 · 1.7B · Q4_K_M · llamacpp`)
-  - Total memory & VRAM allocation + GPU/CPU placement split (`100% GPU`)
-  - Context window (`4K (max 256K)`) & capabilities (`tools`, `thinking`, `vision`)
-  - Active sampling parameters (`temp · top_p · top_k · rep`)
-- **Interactive Parameter Configuration (`Configure`)**:
-  - Sliders & preset chips for `temperature`, `top_p`, `top_k`, `repeat_penalty`, `num_ctx`, and `num_predict`.
+  - **Today's Usage Stacked Bar**: Displays today's total tokens, request count, and live/last `tok/s` above a sleek `6px` proportional stacked bar and colored legend for **Input** (uncached), **Cached** (KV-cache reuse), and **Output** tokens.
+  - **Daily Usage History (`History`)**: Slim `6px` horizontal stacked bar chart showing daily **Input**, **Cached**, and **Output** tokens alongside 7-day & all-time summaries, persisted across reboots and journal rotations in `~/.local/share/cosmic-applet-ollama/token_usage.json` using systemd journal cursors.
+- **One-Click WLAN / LAN Endpoint Copy**:
+  - Automatically detects your machine's active WLAN/LAN IPv4 address (e.g. `http://192.168.x.x:11434`) so you can copy it with one click to use on your laptop or other devices on your local network.
+  - Inspects `/proc/net/tcp{,6}` to indicate whether `ollama.service` is listening on all interfaces (`WLAN Endpoint`) or localhost only (`WLAN (local bind)`).
+- **Lightweight Loaded Model Card (`/api/ps` + `/api/tags` + `/api/show`)**:
+  - Single-line hardware & context summary (`1.7B · Q4_K_M · 1.09 GiB VRAM · 4K ctx`)
+  - Full-width single-line active sampling parameters (`temp 0.10 · top_p 1.00 · top_k 50 · rep 1.10`)
+  - Live auto-unload countdown (`Unloads in 4m 33s` / `Pinned`) paired with highlighted `keep_alive` residency buttons (`5m`, `15m`, `1h`, `Pin ∞`) and one-click **Load** / **Unload**.
+- **Interactive Parameter Configuration (`⚙`)**:
+  - Click the compact `⚙` icon button on any loaded or installed model to adjust `temperature`, `top_p`, `top_k`, `repeat_penalty`, `num_ctx`, and `num_predict` via sliders and preset chips.
   - Update a model **in-place** (auto-reloading if currently in VRAM) or save as a **new custom tag** (e.g. `:coding`, sharing weights with 0 extra disk space) via `POST /api/create`.
-- **Residency & Model Controls**:
-  - Quick `keep_alive` buttons (`5m`, `15m`, `1h`, `Pin ∞`) + live auto-unload countdown.
-  - One-click **Load** and **Unload** (`keep_alive: 0`).
 
 ## Prerequisites
 
@@ -52,7 +50,7 @@ cd ollama-cosmic
 ./install.sh
 ```
 
-This builds the release binary, installs the binary, `.desktop` entry, and symbolic icon into `~/.local`, and automatically restarts any running `cosmic-applet-ollama` panel instance.
+This builds the release binary, installs the binary, `.desktop` entry, and symbolic icons (outline + active filled) into `~/.local`, and automatically restarts any running `cosmic-applet-ollama` panel instance.
 
 To add the applet to your COSMIC Panel:
 1. Open **COSMIC Settings → Desktop → Panel → Configure Panel Applets**
@@ -69,7 +67,7 @@ sudo just install
 
 ## Configuration & Storage
 
-- **`OLLAMA_HOST`**: Defaults to `http://127.0.0.1:11434`. Set `OLLAMA_HOST` in your session environment if your Ollama instance listens on a custom host or port.
+- **`OLLAMA_HOST`**: Defaults to `http://127.0.0.1:11434`. Set `OLLAMA_HOST` in your session environment if your Ollama instance listens on a custom host or port. To expose `ollama.service` on your local Wi-Fi/LAN so the footer `WLAN Endpoint` URL is reachable from another device, set `Environment="OLLAMA_HOST=0.0.0.0:11434"` in `sudo systemctl edit ollama.service`.
 - **Local Data**: Daily token counts and journal cursors are stored locally at `${XDG_DATA_HOME:-~/.local/share}/cosmic-applet-ollama/token_usage.json`. No external telemetry or network requests are ever made outside your configured `OLLAMA_HOST`.
 
 ## Uninstallation
