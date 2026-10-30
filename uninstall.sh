@@ -9,14 +9,15 @@ APPS_DIR="${HOME}/.local/share/applications"
 ICON_DIR="${HOME}/.local/share/icons/hicolor/scalable/apps"
 DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/${BIN_NAME}"
 
-if pgrep -f "${BIN_DIR}/${BIN_NAME}" >/dev/null 2>&1; then
+if pgrep -f "$BIN_NAME" >/dev/null 2>&1; then
     echo "==> Stopping running $BIN_NAME instance..."
-    pkill -f "${BIN_DIR}/${BIN_NAME}" || true
+    pkill -f "$BIN_NAME" || true
 fi
 
 rm -f "${BIN_DIR}/${BIN_NAME}"
 rm -f "${APPS_DIR}/${APP_ID}.desktop"
 rm -f "${ICON_DIR}/${APP_ID}-symbolic.svg"
+rm -f "${ICON_DIR}/${APP_ID}-active-symbolic.svg"
 
 if [ "${1:-}" = "--purge" ]; then
     rm -rf "$DATA_DIR"

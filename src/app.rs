@@ -27,12 +27,16 @@ use std::time::Duration;
 
 const APP_ID: &str = "dev.ashraf.CosmicAppletOllama";
 const POPUP_WIDTH: f32 = 400.0;
+const TODAY_BAR_WIDTH: f32 = 344.0;
 const HBAR_MAX_WIDTH: f32 = 224.0;
-const HBAR_HEIGHT: f32 = 14.0;
+const HBAR_HEIGHT: f32 = 6.0;
 const INPUT_BAR_COLOR: Color = Color::from_rgb(0.24, 0.73, 0.78);
 const CACHED_BAR_COLOR: Color = Color::from_rgb(0.60, 0.47, 0.95);
 const OUTPUT_BAR_COLOR: Color = Color::from_rgb(0.96, 0.66, 0.24);
-const ICON_SVG: &[u8] = include_bytes!("../res/icons/dev.ashraf.CosmicAppletOllama-symbolic.svg");
+const ICON_IDLE_SVG: &[u8] =
+    include_bytes!("../res/icons/dev.ashraf.CosmicAppletOllama-symbolic.svg");
+const ICON_ACTIVE_SVG: &[u8] =
+    include_bytes!("../res/icons/dev.ashraf.CosmicAppletOllama-active-symbolic.svg");
 static POPUP_AUTOSIZE_ID: LazyLock<widget::Id> =
     LazyLock::new(|| widget::Id::new("cosmic-applet-autosize"));
 
@@ -213,27 +217,28 @@ pub struct OllamaApplet {
 }
 
 impl OllamaApplet {
-    fn panel_label(&self) -> String {
-        match &self.snapshot.state {
-            ServiceState::Offline { .. } => "Offline".to_string(),
-            ServiceState::Online { .. } => {
-                if self.snapshot.running.is_empty() {
-                    "Idle".to_string()
-                } else if self.snapshot.running.len() == 1 {
-                    self.snapshot.running[0].display_name.clone()
-                } else {
-                    format!(
-                        "{} +{}",
-                        self.snapshot.running[0].display_name,
-                        self.snapshot.running.len() - 1
-                    )
-                }
-            }
+    fn is_model_loaded(&self) -> bool {
+        matches!(self.snapshot.state, ServiceState::Online { .. })
+            && !self.snapshot.running.is_empty()
+    }
+
+    fn current_icon_bytes(&self) -> &'static [u8] {
+        if self.is_model_loaded() {
+            ICON_ACTIVE_SVG
+        } else {
+            ICON_IDLE_SVG
         }
     }
 
+    fn effective_endpoint(&self) -> &str {
+        self.snapshot
+            .lan_endpoint
+            .as_deref()
+            .unwrap_or(&self.snapshot.host)
+    }
+
     fn symbolic_icon(&self, size: u16) -> cosmic::widget::Icon {
-        let handle = icon::from_svg_bytes(ICON_SVG).symbolic(true);
+        let handle = icon::from_svg_bytes(self.current_icon_bytes()).symbolic(true);
         widget::icon(handle)
             .class(theme::Svg::Custom(Rc::new(|theme| {
                 cosmic::iced::widget::svg::Style {
@@ -245,7 +250,7 @@ impl OllamaApplet {
     }
 
     fn popup_icon(&self, size: u16) -> cosmic::widget::Icon {
-        let handle = icon::from_svg_bytes(ICON_SVG).symbolic(true);
+        let handle = icon::from_svg_bytes(self.current_icon_bytes()).symbolic(true);
         widget::icon(handle)
             .class(theme::Svg::Custom(Rc::new(|theme| {
                 cosmic::iced::widget::svg::Style {
@@ -311,6 +316,7 @@ impl OllamaApplet {
     fn render_today_token_card<'a>(&self) -> Element<'a, Message> {
         let today_date = Local::now().format("%b %d").to_string();
         let today = self.telemetry.today_usage();
+        let day_total = today.total();
 
         let section_header = row([])
             .align_y(Alignment::Center)
@@ -319,148 +325,208 @@ impl OllamaApplet {
                 container(text::caption(format!("TODAY'S TOKEN USAGE · {today_date}")))
                     .width(Length::Fill),
             )
-            .push(
-                button::text("History").on_press(Message::OpenHistory),
-            );
+            .push(button::text("History").on_press(Message::OpenHistory));
 
-        let in_str = if today.cached_input_tokens > 0 {
-            format!(
-                "{} ({} cached)",
-                format_tokens(today.input_tokens),
-                format_tokens(today.cached_input_tokens)
-            )
-        } else {
-            format_tokens(today.input_tokens)
-        };
-
-        let out_str = format_tokens(today.output_tokens);
         let req_word = if today.requests == 1 { "req" } else { "reqs" };
-        let total_str = format!("{} · {} {}", format_tokens(today.total()), today.requests, req_word);
+        let left_summary = format!(
+            "{} tokens · {} {}",
+            format_tokens(day_total),
+            today.requests,
+            req_word
+        );
 
-        let mut rows_col = column([])
-            .spacing(4)
-            .push(kv_row("Input tokens", in_str))
-            .push(kv_row("Output tokens", out_str))
-            .push(kv_row("Total today", total_str));
-
-        if let Some(live) = &self.telemetry.active_generation {
+        let right_speed = if let Some(live) = &self.telemetry.active_generation {
             let speed_part = live
                 .current_tok_per_sec
                 .map(|r| format!(" · {r:.1} tok/s"))
                 .unwrap_or_default();
-            rows_col = rows_col.push(kv_row(
-                "Active stream",
-                format!(
-                    "{} in · {} out{speed_part}",
-                    format_tokens(live.prompt_tokens),
-                    format_tokens(live.generated_so_far)
-                ),
-            ));
+            format!(
+                "Streaming {} out{speed_part}",
+                format_tokens(live.generated_so_far)
+            )
         } else if let Some(tps) = self.telemetry.last_tok_per_sec {
-            rows_col = rows_col.push(kv_row(
-                "Last request",
-                format!(
-                    "{} in · {} out · {tps:.1} tok/s",
-                    format_tokens(self.telemetry.last_input_tokens),
-                    format_tokens(self.telemetry.last_output_tokens)
-                ),
+            format!("{tps:.1} tok/s")
+        } else {
+            String::new()
+        };
+
+        let mut summary_row = row([])
+            .align_y(Alignment::Center)
+            .spacing(8)
+            .push(container(text::body(left_summary)).width(Length::Fill));
+        if !right_speed.is_empty() {
+            summary_row = summary_row.push(text::caption(right_speed));
+        }
+
+        let segments = build_horizontal_segments(&today, day_total.max(1), TODAY_BAR_WIDTH);
+        let used_w: f32 = segments.iter().map(|(w, _, _)| *w).sum();
+        let mut stack_row = row([]).width(Length::Fill).height(Length::Fill);
+        for (seg_w, seg_color, radii) in segments {
+            stack_row = stack_row.push(colored_segment(
+                Length::Fixed(seg_w),
+                Length::Fill,
+                seg_color,
+                radii,
             ));
         }
+        let empty_w = (TODAY_BAR_WIDTH - used_w).max(0.0);
+        if empty_w > 0.0 {
+            stack_row = stack_row.push(
+                container(row([]))
+                    .width(Length::Fixed(empty_w))
+                    .height(Length::Fill),
+            );
+        }
+
+        let bar_track = container(stack_row)
+            .width(Length::Fixed(TODAY_BAR_WIDTH))
+            .height(Length::Fixed(HBAR_HEIGHT))
+            .class(theme::Container::Custom(Box::new(|_theme| {
+                cosmic::iced::widget::container::Style {
+                    text_color: None,
+                    background: Some(Color::from_rgba(0.5, 0.5, 0.5, 0.14).into()),
+                    border: Border {
+                        radius: 3.0.into(),
+                        width: 0.0,
+                        color: Color::TRANSPARENT,
+                    },
+                    shadow: Shadow::default(),
+                    icon_color: None,
+                    snap: true,
+                }
+            })));
+
+        let cached = today.cached_input_tokens.min(today.input_tokens);
+        let uncached_in = today.input_tokens.saturating_sub(cached);
+        let legend_row = row([])
+            .align_y(Alignment::Center)
+            .spacing(12)
+            .push(legend_stat(
+                INPUT_BAR_COLOR,
+                format!("{} in", format_tokens(uncached_in)),
+            ))
+            .push(legend_stat(
+                CACHED_BAR_COLOR,
+                format!("{} cached", format_tokens(cached)),
+            ))
+            .push(legend_stat(
+                OUTPUT_BAR_COLOR,
+                format!("{} out", format_tokens(today.output_tokens)),
+            ));
+
+        let card_col = column([])
+            .spacing(8)
+            .push(summary_row)
+            .push(bar_track)
+            .push(legend_row);
 
         column([])
             .spacing(6)
             .push(section_header)
-            .push(solid_card(rows_col))
+            .push(solid_card(card_col))
             .into()
     }
 
     fn render_running_card<'a>(&self, model: &'a RunningModel) -> Element<'a, Message> {
         let is_busy = self.busy_models.contains(&model.name);
-        let cfg_btn =
-            button::standard("Configure").on_press(Message::OpenConfigure(model.name.clone()));
+        let cfg_btn = button::icon(icon::from_name("emblem-system-symbolic"))
+            .extra_small()
+            .on_press(Message::OpenConfigure(model.name.clone()));
         let unload_btn = if is_busy {
             button::standard("Working…")
         } else {
             button::destructive("Unload").on_press(Message::UnloadModel(model.name.clone()))
         };
 
+        let mut subtitle_parts = Vec::new();
+        if !model.parameter_size.is_empty() {
+            subtitle_parts.push(model.parameter_size.clone());
+        }
+        if !model.quantization.is_empty() {
+            subtitle_parts.push(model.quantization.clone());
+        }
+        if model.size_bytes > 0 {
+            let mem_part = if model.size_vram_bytes >= model.size_bytes {
+                format!("{} VRAM", format_bytes(model.size_vram_bytes))
+            } else if model.size_vram_bytes == 0 {
+                format!("{} RAM", format_bytes(model.size_bytes))
+            } else {
+                let gpu_pct = ((model.size_vram_bytes as f64 / model.size_bytes as f64) * 100.0)
+                    .round() as u64;
+                format!("{} ({gpu_pct}% VRAM)", format_bytes(model.size_bytes))
+            };
+            subtitle_parts.push(mem_part);
+        }
+        if let Some(ctx) = model.context_length.or(model.max_context_length) {
+            subtitle_parts.push(format!("{} ctx", format_context(ctx)));
+        }
+        let subtitle = subtitle_parts.join(" · ");
+
+        let header_info = column([])
+            .spacing(2)
+            .width(Length::Fill)
+            .push(text::heading(&model.display_name))
+            .push(text::caption(subtitle))
+            .push(text::caption(model.params.summary_line()));
+
         let title_row = row([])
             .align_y(Alignment::Center)
             .spacing(6)
-            .push(
-                column([])
-                    .spacing(2)
-                    .width(Length::Fill)
-                    .push(text::heading(&model.display_name))
-                    .push(text::caption(&model.name)),
-            )
+            .push(header_info)
             .push(cfg_btn)
             .push(unload_btn);
 
-        let mut specs_line_1 = Vec::new();
-        if !model.family.is_empty() {
-            specs_line_1.push(model.family.clone());
-        }
-        if !model.parameter_size.is_empty() {
-            specs_line_1.push(model.parameter_size.clone());
-        }
-        if !model.quantization.is_empty() {
-            specs_line_1.push(model.quantization.clone());
-        }
-        if !model.runner.is_empty() {
-            specs_line_1.push(model.runner.clone());
-        }
-
-        let mem_value = if model.size_vram_bytes > 0 {
-            format!(
-                "{} ({} VRAM)",
-                format_bytes(model.size_bytes),
-                format_bytes(model.size_vram_bytes)
-            )
-        } else {
-            format!("{} RAM", format_bytes(model.size_bytes))
-        };
-
-        let ctx_value = match (model.context_length, model.max_context_length) {
-            (Some(active), Some(max)) if max > active => {
-                format!("{} (max {})", format_context(active), format_context(max))
-            }
-            (Some(active), _) => format_context(active),
-            (None, Some(max)) => format!("up to {}", format_context(max)),
-            (None, None) => "Default".to_string(),
-        };
-
-        let mut details_col = column([]).spacing(4);
-        if !specs_line_1.is_empty() {
-            details_col = details_col.push(kv_row("Architecture", specs_line_1.join(" · ")));
-        }
-        details_col = details_col
-            .push(kv_row("Memory", mem_value))
-            .push(kv_row("Processor", model.processor_summary()))
-            .push(kv_row("Context", ctx_value))
-            .push(kv_row("Parameters", model.params.summary_line()));
-
-        if !model.capabilities.is_empty() {
-            details_col = details_col.push(kv_row("Capabilities", model.capabilities.join(", ")));
-        }
-        details_col = details_col.push(kv_row("Auto-unload", model.expiry_summary(self.now)));
-
-        // Keep-alive quick residency buttons
         let pinned = model.is_pinned_forever(self.now);
+        let rem_secs = model
+            .expires_at
+            .map(|exp| (exp - self.now).num_seconds().max(0))
+            .unwrap_or(i64::MAX);
+        let active_5m = !pinned && rem_secs <= 5 * 60 + 5;
+        let active_15m = !pinned && rem_secs > 5 * 60 + 5 && rem_secs <= 15 * 60 + 5;
+        let active_1h = !pinned && rem_secs > 15 * 60 + 5 && rem_secs <= 60 * 60 + 5;
+
+        let timer_label = if pinned {
+            "Pinned".to_string()
+        } else {
+            format!("Unloads in {}", model.expiry_summary(self.now))
+        };
+
         let keep_row = row([])
             .align_y(Alignment::Center)
             .spacing(4)
-            .push(container(text::caption("Residency")).width(Length::Fill))
-            .push(keep_alive_btn(&model.name, "5m", serde_json::Value::from("5m"), false, is_busy))
-            .push(keep_alive_btn(&model.name, "15m", serde_json::Value::from("15m"), false, is_busy))
-            .push(keep_alive_btn(&model.name, "1h", serde_json::Value::from("1h"), false, is_busy))
-            .push(keep_alive_btn(&model.name, "Pin ∞", serde_json::Value::from(-1), pinned, is_busy));
+            .push(container(text::caption(timer_label)).width(Length::Fill))
+            .push(keep_alive_btn(
+                &model.name,
+                "5m",
+                serde_json::Value::from("5m"),
+                active_5m,
+                is_busy,
+            ))
+            .push(keep_alive_btn(
+                &model.name,
+                "15m",
+                serde_json::Value::from("15m"),
+                active_15m,
+                is_busy,
+            ))
+            .push(keep_alive_btn(
+                &model.name,
+                "1h",
+                serde_json::Value::from("1h"),
+                active_1h,
+                is_busy,
+            ))
+            .push(keep_alive_btn(
+                &model.name,
+                "Pin ∞",
+                serde_json::Value::from(-1),
+                pinned,
+                is_busy,
+            ));
 
         let card_inner = column([])
             .spacing(8)
             .push(title_row)
-            .push(divider::horizontal::light())
-            .push(details_col)
             .push(divider::horizontal::light())
             .push(keep_row);
 
@@ -494,7 +560,9 @@ impl OllamaApplet {
             .push(text::body(&model.display_name))
             .push(text::caption(meta_parts.join(" · ")));
 
-        let cfg_btn = button::text("Configure").on_press(Message::OpenConfigure(model.name.clone()));
+        let cfg_btn = button::icon(icon::from_name("emblem-system-symbolic"))
+            .extra_small()
+            .on_press(Message::OpenConfigure(model.name.clone()));
 
         let action_widget: Element<'a, Message> = if is_running {
             text::caption("Active").into()
@@ -518,10 +586,15 @@ impl OllamaApplet {
     fn render_overview<'a>(&'a self) -> Element<'a, Message> {
         let status_subtitle = match &self.snapshot.state {
             ServiceState::Online { version } => {
-                if version.is_empty() {
-                    "Service online".to_string()
+                let state_word = if self.snapshot.running.is_empty() {
+                    "Idle".to_string()
                 } else {
-                    format!("Online · v{version}")
+                    format!("{} loaded", self.snapshot.running.len())
+                };
+                if version.is_empty() {
+                    format!("Online · {state_word}")
+                } else {
+                    format!("Online · v{version} · {state_word}")
                 }
             }
             ServiceState::Offline { systemd_state, .. } => {
@@ -577,32 +650,25 @@ impl OllamaApplet {
                 body = body.push(padded_control(offline_box));
             }
             ServiceState::Online { .. } => {
-                let active_header = row([])
-                    .align_y(Alignment::Center)
-                    .push(container(text::caption("LOADED IN MEMORY")).width(Length::Fill))
-                    .push(text::caption(format!("{} active", self.snapshot.running.len())));
-                body = body.push(padded_control(active_header));
+                if !self.snapshot.running.is_empty() {
+                    let active_header = row([])
+                        .align_y(Alignment::Center)
+                        .push(container(text::caption("LOADED IN MEMORY")).width(Length::Fill))
+                        .push(text::caption(format!("{} active", self.snapshot.running.len())));
+                    body = body.push(padded_control(active_header));
 
-                if self.snapshot.running.is_empty() {
-                    let idle_card = solid_card(
-                        column([])
-                            .spacing(4)
-                            .push(text::body("No model currently loaded"))
-                            .push(text::caption(
-                                "Ollama is idle (0 VRAM). Models load automatically on inference or via Load below.",
-                            )),
-                    );
-                    body = body.push(padded_control(idle_card));
-                } else {
                     let mut active_col = column([]).spacing(8);
                     for running in &self.snapshot.running {
                         active_col = active_col.push(self.render_running_card(running));
                     }
                     body = body.push(padded_control(active_col));
+
+                    if !self.snapshot.installed.is_empty() {
+                        body = body.push(padded_control(divider::horizontal::light()));
+                    }
                 }
 
                 if !self.snapshot.installed.is_empty() {
-                    body = body.push(padded_control(divider::horizontal::light()));
                     let installed_header = row([])
                         .align_y(Alignment::Center)
                         .push(container(text::caption("INSTALLED MODELS")).width(Length::Fill))
@@ -643,13 +709,23 @@ impl OllamaApplet {
     }
 
     fn render_endpoint_row<'a>(&'a self) -> Element<'a, Message> {
+        let left_label = if self.snapshot.lan_endpoint.is_some() {
+            if self.snapshot.lan_exposed {
+                "WLAN Endpoint"
+            } else {
+                "WLAN (local bind)"
+            }
+        } else {
+            "Endpoint"
+        };
+        let endpoint = self.effective_endpoint();
         let (right_label, icon_name) = if self.endpoint_copied {
             (
-                format!("{} · Copied!", self.snapshot.host),
+                format!("{endpoint} · Copied!"),
                 "object-select-symbolic",
             )
         } else {
-            (self.snapshot.host.clone(), "edit-copy-symbolic")
+            (endpoint.to_string(), "edit-copy-symbolic")
         };
 
         let copy_icon = icon::from_name(icon_name).size(14).symbolic(true);
@@ -657,7 +733,7 @@ impl OllamaApplet {
             .align_y(Alignment::Center)
             .spacing(6)
             .width(Length::Fill)
-            .push(container(text::caption("Endpoint")).width(Length::Fill))
+            .push(container(text::caption(left_label)).width(Length::Fill))
             .push(text::caption(right_label))
             .push(widget::icon(copy_icon.into()).size(14));
 
@@ -684,7 +760,7 @@ impl OllamaApplet {
                     .push(legend_item(OUTPUT_BAR_COLOR, "Output")),
             );
 
-        let mut bars_col = column([]).spacing(8).width(Length::Fill);
+        let mut bars_col = column([]).spacing(6).width(Length::Fill);
 
         for (_date_key, short_label, tokens) in series {
             let day_total = tokens.total();
@@ -717,7 +793,7 @@ impl OllamaApplet {
                         text_color: None,
                         background: Some(Color::from_rgba(0.5, 0.5, 0.5, 0.14).into()),
                         border: Border {
-                            radius: 4.0.into(),
+                            radius: 3.0.into(),
                             width: 0.0,
                             color: Color::TRANSPARENT,
                         },
@@ -1074,8 +1150,8 @@ fn legend_item<'a>(color: Color, label: &'static str) -> Element<'a, Message> {
         .align_y(Alignment::Center)
         .spacing(4)
         .push(colored_segment(
-            Length::Fixed(8.0),
-            Length::Fixed(8.0),
+            Length::Fixed(6.0),
+            Length::Fixed(6.0),
             color,
             [2.0, 2.0, 2.0, 2.0],
         ))
@@ -1088,8 +1164,8 @@ fn legend_stat<'a>(color: Color, label: String) -> Element<'a, Message> {
         .align_y(Alignment::Center)
         .spacing(4)
         .push(colored_segment(
-            Length::Fixed(8.0),
-            Length::Fixed(8.0),
+            Length::Fixed(6.0),
+            Length::Fixed(6.0),
             color,
             [2.0, 2.0, 2.0, 2.0],
         ))
@@ -1152,8 +1228,8 @@ fn build_horizontal_segments(
         .zip(widths)
         .enumerate()
         .map(|(idx, ((_, color), w))| {
-            let left_r = if idx == 0 { 4.0 } else { 0.0 };
-            let right_r = if idx + 1 == len { 4.0 } else { 0.0 };
+            let left_r = if idx == 0 { 3.0 } else { 0.0 };
+            let right_r = if idx + 1 == len { 3.0 } else { 0.0 };
             (w, color, [left_r, right_r, right_r, left_r])
         })
         .collect()
@@ -1647,7 +1723,7 @@ impl Application for OllamaApplet {
                 self.endpoint_copied = true;
                 self.endpoint_copied_seq = self.endpoint_copied_seq.wrapping_add(1);
                 let seq = self.endpoint_copied_seq;
-                let endpoint = self.snapshot.host.clone();
+                let endpoint = self.effective_endpoint().to_string();
                 let iced_clip = cosmic::iced::clipboard::write(endpoint.clone());
                 let wl_and_reset = Task::perform(
                     copy_to_wayland_clipboard_and_wait(endpoint),
@@ -1667,33 +1743,27 @@ impl Application for OllamaApplet {
     fn view(&self) -> Element<'_, Self::Message> {
         let suggested = self.core.applet.suggested_size(true);
         let (major_pad, minor_pad) = self.core.applet.suggested_padding(true);
+        let icon_el = self.symbolic_icon(suggested.0);
 
-        if self.core.applet.is_horizontal() {
-            let content = row([])
-                .align_y(Alignment::Center)
-                .spacing(6)
-                .push(self.symbolic_icon(suggested.0))
-                .push(self.core.applet.text(self.panel_label()));
-
-            let btn = button::custom(
-                widget::layer_container(content)
+        let btn = if self.core.applet.is_horizontal() {
+            button::custom(
+                widget::layer_container(icon_el)
                     .center_y(Length::Fixed(f32::from(suggested.1 + 2 * minor_pad))),
             )
             .padding([0, major_pad])
             .class(theme::Button::AppletIcon)
-            .on_press_down(Message::TogglePopup);
-
-            self.core.applet.autosize_window(btn).into()
+            .on_press_down(Message::TogglePopup)
         } else {
-            let handle = icon::from_svg_bytes(ICON_SVG).symbolic(true);
-            let btn = self
-                .core
-                .applet
-                .icon_button_from_handle(handle)
-                .on_press_down(Message::TogglePopup);
+            button::custom(
+                widget::layer_container(icon_el)
+                    .center_x(Length::Fixed(f32::from(suggested.0 + 2 * minor_pad))),
+            )
+            .padding([major_pad, 0])
+            .class(theme::Button::AppletIcon)
+            .on_press_down(Message::TogglePopup)
+        };
 
-            self.core.applet.autosize_window(btn).into()
-        }
+        self.core.applet.autosize_window(btn).into()
     }
 
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
@@ -1724,9 +1794,9 @@ mod tests {
         };
         let segs = build_horizontal_segments(&day, 27_002, 224.0);
         assert_eq!(segs.len(), 3);
-        assert_eq!(segs[0].2, [4.0, 0.0, 0.0, 4.0]);
+        assert_eq!(segs[0].2, [3.0, 0.0, 0.0, 3.0]);
         assert_eq!(segs[1].2, [0.0, 0.0, 0.0, 0.0]);
-        assert_eq!(segs[2].2, [0.0, 4.0, 4.0, 0.0]);
+        assert_eq!(segs[2].2, [0.0, 3.0, 3.0, 0.0]);
         let sum_w: f32 = segs.iter().map(|(w, _, _)| *w).sum();
         assert!((sum_w - 148.0).abs() <= 1.0);
         assert!(segs.iter().all(|(w, _, _)| *w >= 3.0));

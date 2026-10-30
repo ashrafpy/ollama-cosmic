@@ -28,8 +28,9 @@ mkdir -p "$BIN_DIR" "$APPS_DIR" "$ICON_DIR"
 echo "==> Installing binary to $BIN_DIR/$BIN_NAME"
 install -Dm755 "target/release/$BIN_NAME" "$BIN_DIR/$BIN_NAME"
 
-echo "==> Installing symbolic icon to $ICON_DIR/${APP_ID}-symbolic.svg"
+echo "==> Installing symbolic icons to $ICON_DIR/"
 install -Dm644 "res/icons/${APP_ID}-symbolic.svg" "$ICON_DIR/${APP_ID}-symbolic.svg"
+install -Dm644 "res/icons/${APP_ID}-active-symbolic.svg" "$ICON_DIR/${APP_ID}-active-symbolic.svg"
 
 echo "==> Installing desktop entry to $APPS_DIR/${APP_ID}.desktop"
 sed "s|^Exec=.*|Exec=${BIN_DIR}/${BIN_NAME}|" "res/${APP_ID}.desktop" > "$APPS_DIR/${APP_ID}.desktop"
@@ -42,9 +43,9 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor" >/dev/null 2>&1 || true
 fi
 
-if pgrep -f "${BIN_DIR}/${BIN_NAME}" >/dev/null 2>&1; then
+if pgrep -f "$BIN_NAME" >/dev/null 2>&1; then
     echo "==> Restarting running $BIN_NAME instance..."
-    pkill -f "${BIN_DIR}/${BIN_NAME}" || true
+    pkill -f "$BIN_NAME" || true
 fi
 
 echo ""

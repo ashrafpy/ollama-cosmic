@@ -252,6 +252,7 @@ struct ShowRequest<'a> {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RunningModel {
     pub name: String,
     pub display_name: String,
@@ -268,6 +269,7 @@ pub struct RunningModel {
     pub params: ModelParams,
 }
 
+#[allow(dead_code)]
 impl RunningModel {
     /// Processor placement summary (e.g. "100% GPU", "68% GPU · 32% CPU", "100% CPU")
     pub fn processor_summary(&self) -> String {
@@ -342,6 +344,8 @@ pub enum ServiceState {
 #[derive(Debug, Clone)]
 pub struct OllamaSnapshot {
     pub host: String,
+    pub lan_endpoint: Option<String>,
+    pub lan_exposed: bool,
     pub state: ServiceState,
     pub running: Vec<RunningModel>,
     pub installed: Vec<InstalledModel>,
@@ -349,8 +353,12 @@ pub struct OllamaSnapshot {
 
 impl Default for OllamaSnapshot {
     fn default() -> Self {
+        let host = resolve_ollama_host();
+        let (lan_endpoint, lan_exposed) = resolve_lan_endpoint(&host);
         Self {
-            host: resolve_ollama_host(),
+            host,
+            lan_endpoint,
+            lan_exposed,
             state: ServiceState::Offline {
                 systemd_state: "checking…".to_string(),
                 error: "Connecting to Ollama…".to_string(),
@@ -373,6 +381,194 @@ pub fn resolve_ollama_host() -> String {
         format!("http://{trimmed}")
     };
     with_scheme.replace("://0.0.0.0", "://127.0.0.1")
+}
+
+pub fn extract_port(api_host: &str) -> Option<u16> {
+    let without_scheme = api_host
+        .trim()
+        .strip_prefix("http://")
+        .or_else(|| api_host.trim().strip_prefix("https://"))
+        .unwrap_or(api_host.trim());
+    let authority = without_scheme.split('/').next()?;
+    let port_str = if let Some(rest) = authority.strip_prefix('[') {
+        let (_, after_bracket) = rest.split_once(']')?;
+        after_bracket.strip_prefix(':')?
+    } else {
+        let (_, port_part) = authority.rsplit_once(':')?;
+        port_part
+    };
+    port_str.parse::<u16>().ok()
+}
+
+fn is_loopback_proc_ip(ip_hex: &str) -> bool {
+    let upper = ip_hex.to_ascii_uppercase();
+    if upper.len() == 8 {
+        if upper == "0100007F" || upper.ends_with("7F") {
+            return true;
+        }
+        if let Ok(raw) = u32::from_str_radix(&upper, 16) {
+            return std::net::Ipv4Addr::from(raw.to_ne_bytes()).is_loopback();
+        }
+        false
+    } else if upper.len() == 32 {
+        upper == "00000000000000000000000001000000"
+            || upper == "00000000000000000000000000000001"
+            || (upper.starts_with("0000000000000000FFFF0000") && upper.ends_with("7F"))
+    } else {
+        false
+    }
+}
+
+pub fn parse_proc_net_tcp_exposed(content: &str, port: u16) -> bool {
+    let port_hex = format!("{port:04X}");
+    for line in content.lines().skip(1) {
+        let mut cols = line.split_whitespace();
+        let _sl = cols.next();
+        let Some(local_addr) = cols.next() else {
+            continue;
+        };
+        let _rem_addr = cols.next();
+        let Some(state) = cols.next() else {
+            continue;
+        };
+        if !state.eq_ignore_ascii_case("0A") {
+            continue;
+        }
+        let Some((ip_hex, lport_hex)) = local_addr.split_once(':') else {
+            continue;
+        };
+        if lport_hex.eq_ignore_ascii_case(&port_hex) && !is_loopback_proc_ip(ip_hex) {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn is_port_exposed_on_lan(port: u16) -> bool {
+    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if parse_proc_net_tcp_exposed(&content, port) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_wireless_iface(iface: &str) -> bool {
+    iface.starts_with("wl")
+        || std::path::Path::new(&format!("/sys/class/net/{iface}/wireless")).exists()
+        || std::path::Path::new(&format!("/sys/class/net/{iface}/phy80211")).exists()
+}
+
+fn is_virtual_or_loopback_iface(iface: &str) -> bool {
+    iface == "lo"
+        || iface.starts_with("lo")
+        || iface.starts_with("docker")
+        || iface.starts_with("br-")
+        || iface.starts_with("veth")
+        || iface.starts_with("virbr")
+}
+
+fn probe_local_ipv4_for_target(target: std::net::Ipv4Addr) -> Option<std::net::Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect((target, 80)).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+        _ => None,
+    }
+}
+
+fn probe_route_line_ipv4(dest_hex: &str, gateway_hex: &str, mask_hex: &str) -> Option<std::net::Ipv4Addr> {
+    let dest_raw = u32::from_str_radix(dest_hex, 16).ok()?;
+    let gateway_raw = u32::from_str_radix(gateway_hex, 16).ok()?;
+    let mask_raw = u32::from_str_radix(mask_hex, 16).ok()?;
+
+    if dest_raw != 0 && mask_raw != 0 && mask_raw != 0xFFFF_FFFF {
+        let net = u32::from_be_bytes(dest_raw.to_ne_bytes())
+            & u32::from_be_bytes(mask_raw.to_ne_bytes());
+        for host_offset in [1_u32, 2_u32] {
+            let target = std::net::Ipv4Addr::from(net | host_offset);
+            if let Some(ip) = probe_local_ipv4_for_target(target) {
+                return Some(ip);
+            }
+        }
+    }
+    if gateway_raw != 0 {
+        let gw = std::net::Ipv4Addr::from(gateway_raw.to_ne_bytes());
+        if let Some(ip) = probe_local_ipv4_for_target(gw) {
+            return Some(ip);
+        }
+    }
+    None
+}
+
+pub fn detect_wlan_or_lan_ipv4() -> Option<std::net::Ipv4Addr> {
+    let route_table = std::fs::read_to_string("/proc/net/route").ok();
+
+    // 1. Prefer wireless interfaces in /proc/net/route
+    if let Some(ref content) = route_table {
+        for line in content.lines().skip(1) {
+            let mut cols = line.split_whitespace();
+            let (Some(iface), Some(dest), Some(gateway), _, _, _, _, Some(mask)) = (
+                cols.next(),
+                cols.next(),
+                cols.next(),
+                cols.next(),
+                cols.next(),
+                cols.next(),
+                cols.next(),
+                cols.next(),
+            ) else {
+                continue;
+            };
+            if is_wireless_iface(iface) {
+                if let Some(ip) = probe_route_line_ipv4(dest, gateway, mask) {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+
+    // 2. Standard default route lookup via UDP socket connect
+    if let Some(ip) = probe_local_ipv4_for_target(std::net::Ipv4Addr::new(1, 1, 1, 1))
+        .or_else(|| probe_local_ipv4_for_target(std::net::Ipv4Addr::new(8, 8, 8, 8)))
+    {
+        return Some(ip);
+    }
+
+    // 3. Fallback to any non-loopback, non-virtual interface route in /proc/net/route
+    if let Some(ref content) = route_table {
+        for line in content.lines().skip(1) {
+            let mut cols = line.split_whitespace();
+            let (Some(iface), Some(dest), Some(gateway), _, _, _, _, Some(mask)) = (
+                cols.next(),
+                cols.next(),
+                cols.next(),
+                cols.next(),
+                cols.next(),
+                cols.next(),
+                cols.next(),
+                cols.next(),
+            ) else {
+                continue;
+            };
+            if !is_virtual_or_loopback_iface(iface) {
+                if let Some(ip) = probe_route_line_ipv4(dest, gateway, mask) {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+pub fn resolve_lan_endpoint(api_host: &str) -> (Option<String>, bool) {
+    let port = extract_port(api_host).unwrap_or(11434);
+    let exposed = is_port_exposed_on_lan(port);
+    let lan_ip = detect_wlan_or_lan_ipv4();
+    (lan_ip.map(|ip| format!("http://{ip}:{port}")), exposed)
 }
 
 pub fn compact_model_name(name: &str) -> String {
@@ -595,9 +791,12 @@ pub async fn fetch_ps_only(prev: OllamaSnapshot) -> OllamaSnapshot {
         return fetch_snapshot().await;
     }
 
+    let (lan_endpoint, lan_exposed) = resolve_lan_endpoint(&host);
     let running = build_running_models(&client, &host, ps_resp.models, &prev.installed).await;
     OllamaSnapshot {
         host,
+        lan_endpoint,
+        lan_exposed,
         state: prev.state,
         running,
         installed: prev.installed,
@@ -606,11 +805,14 @@ pub async fn fetch_ps_only(prev: OllamaSnapshot) -> OllamaSnapshot {
 
 pub async fn fetch_snapshot() -> OllamaSnapshot {
     let host = resolve_ollama_host();
+    let (lan_endpoint, lan_exposed) = resolve_lan_endpoint(&host);
     let client = match build_client() {
         Ok(c) => c,
         Err(e) => {
             return OllamaSnapshot {
                 host,
+                lan_endpoint,
+                lan_exposed,
                 state: ServiceState::Offline {
                     systemd_state: "unknown".to_string(),
                     error: e.to_string(),
@@ -638,6 +840,8 @@ pub async fn fetch_snapshot() -> OllamaSnapshot {
                 let systemd_state = check_systemd_unit().await;
                 return OllamaSnapshot {
                     host,
+                    lan_endpoint,
+                    lan_exposed,
                     state: ServiceState::Offline {
                         systemd_state,
                         error: format!("Invalid /api/ps JSON: {e}"),
@@ -652,6 +856,8 @@ pub async fn fetch_snapshot() -> OllamaSnapshot {
             let systemd_state = check_systemd_unit().await;
             return OllamaSnapshot {
                 host,
+                lan_endpoint,
+                lan_exposed,
                 state: ServiceState::Offline {
                     systemd_state,
                     error: format!("HTTP {status}"),
@@ -671,6 +877,8 @@ pub async fn fetch_snapshot() -> OllamaSnapshot {
             };
             return OllamaSnapshot {
                 host,
+                lan_endpoint,
+                lan_exposed,
                 state: ServiceState::Offline {
                     systemd_state,
                     error: short_err,
@@ -723,6 +931,8 @@ pub async fn fetch_snapshot() -> OllamaSnapshot {
 
     OllamaSnapshot {
         host,
+        lan_endpoint,
+        lan_exposed,
         state: ServiceState::Online { version },
         running,
         installed,
@@ -960,5 +1170,34 @@ mod tests {
         assert_eq!(ps.models.len(), 1);
         assert_eq!(ps.models[0].size_vram, 1_500_000_000);
         assert_eq!(ps.models[0].context_length, Some(4096));
+    }
+
+    #[test]
+    fn test_extract_port_and_lan_exposure() {
+        assert_eq!(extract_port("http://127.0.0.1:11434"), Some(11434));
+        assert_eq!(extract_port("https://192.168.1.50:8080/"), Some(8080));
+        assert_eq!(extract_port("http://[::1]:11435"), Some(11435));
+        assert_eq!(extract_port("http://localhost"), None);
+
+        // 11434 = 0x2CAA
+        let loopback_v4 = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:2CAA 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0\n";
+        assert!(!parse_proc_net_tcp_exposed(loopback_v4, 11434));
+
+        let wildcard_v4 = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000:2CAA 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0\n";
+        assert!(parse_proc_net_tcp_exposed(wildcard_v4, 11434));
+
+        let loopback_v6 = "\
+  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000000000000000000001000000:2CAA 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0\n";
+        assert!(!parse_proc_net_tcp_exposed(loopback_v6, 11434));
+
+        let wildcard_v6 = "\
+  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000000000000000000000000000:2CAA 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0\n";
+        assert!(parse_proc_net_tcp_exposed(wildcard_v6, 11434));
     }
 }
