@@ -1,0 +1,15 @@
+[Desktop Entry]
+Name=Ollama Model Status
+Comment=Display active local Ollama inference models and memory usage on the COSMIC panel
+Type=Application
+Exec=cosmic-applet-ollama
+Terminal=false
+Categories=COSMIC;Utility;
+Keywords=COSMIC;Applet;Ollama;AI;LLM;Model;Inference;
+Icon=dev.ashraf.CosmicAppletOllama-symbolic
+StartupNotify=true
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicShrinkable=true
+X-CosmicHoverPopup=Auto
+X-OverflowPriority=10

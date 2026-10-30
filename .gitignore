@@ -1,0 +1,11 @@
+# Rust build artifacts
+/target/
+
+# Editor & OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.orig

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.ashraf.CosmicAppletOllama</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Ollama Model Status</name>
+  <summary>Monitor and control local Ollama inference models on the COSMIC panel</summary>
+  <developer id="dev.ashraf">
+    <name>ashrafpy</name>
+  </developer>
+  <description>
+    <p>
+      A native COSMIC Desktop panel applet for monitoring and controlling local Ollama inference models, VRAM allocation, Modelfile parameters, residency (keep_alive), and daily token usage telemetry.
+    </p>
+  </description>
+  <icon type="stock">dev.ashraf.CosmicAppletOllama-symbolic</icon>
+  <launchable type="desktop-id">dev.ashraf.CosmicAppletOllama.desktop</launchable>
+  <url type="homepage">https://github.com/ashrafpy/ollama-cosmic</url>
+  <url type="vcs-browser">https://github.com/ashrafpy/ollama-cosmic</url>
+  <url type="bugtracker">https://github.com/ashrafpy/ollama-cosmic/issues</url>
+  <categories>
+    <category>Utility</category>
+  </categories>
+  <provides>
+    <id>com.system76.CosmicApplet</id>
+    <binary>cosmic-applet-ollama</binary>
+  </provides>
+  <content_rating type="oars-1.1" />
+</component>
