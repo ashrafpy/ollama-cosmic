@@ -22,6 +22,7 @@ pub struct ModelParams {
 }
 
 impl ModelParams {
+    #[allow(dead_code)]
     pub fn summary_line(&self) -> String {
         let mut parts = Vec::new();
         if let Some(t) = self.temperature {
@@ -343,8 +344,13 @@ pub enum ServiceState {
 
 #[derive(Debug, Clone)]
 pub struct OllamaSnapshot {
+    /// API host used for HTTP requests (not displayed to user; see `display_host`).
+    #[allow(dead_code)]
     pub host: String,
+    pub display_host: String,
+    #[allow(dead_code)]
     pub lan_endpoint: Option<String>,
+    #[allow(dead_code)]
     pub lan_exposed: bool,
     pub state: ServiceState,
     pub running: Vec<RunningModel>,
@@ -353,10 +359,12 @@ pub struct OllamaSnapshot {
 
 impl Default for OllamaSnapshot {
     fn default() -> Self {
-        let host = resolve_ollama_host();
+        let host = resolve_ollama_api_host();
+        let display_host = resolve_ollama_display_host();
         let (lan_endpoint, lan_exposed) = resolve_lan_endpoint(&host);
         Self {
             host,
+            display_host,
             lan_endpoint,
             lan_exposed,
             state: ServiceState::Offline {
@@ -369,7 +377,7 @@ impl Default for OllamaSnapshot {
     }
 }
 
-pub fn resolve_ollama_host() -> String {
+pub fn resolve_ollama_api_host() -> String {
     let raw = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
     let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -381,6 +389,20 @@ pub fn resolve_ollama_host() -> String {
         format!("http://{trimmed}")
     };
     with_scheme.replace("://0.0.0.0", "://127.0.0.1")
+}
+
+/// Host for display — preserves the user-configured value (including 0.0.0.0).
+pub fn resolve_ollama_display_host() -> String {
+    let raw = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "http://127.0.0.1:11434".to_string();
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    }
 }
 
 pub fn extract_port(api_host: &str) -> Option<u16> {
@@ -662,7 +684,7 @@ async fn get_cached_or_fetch_params(client: &Client, host: &str, name: &str, dig
 }
 
 pub async fn fetch_model_params(model: String) -> Result<(String, ModelParams), String> {
-    let host = resolve_ollama_host();
+    let host = resolve_ollama_api_host();
     let client = build_client().map_err(|e| e.to_string())?;
     let show_url = format!("{host}/api/show");
     let res = client
@@ -764,7 +786,8 @@ pub async fn fetch_ps_only(prev: OllamaSnapshot) -> OllamaSnapshot {
         return fetch_snapshot().await;
     }
 
-    let host = resolve_ollama_host();
+    let host = resolve_ollama_api_host();
+    let display_host = resolve_ollama_display_host();
     let Ok(client) = build_client() else {
         return fetch_snapshot().await;
     };
@@ -795,6 +818,7 @@ pub async fn fetch_ps_only(prev: OllamaSnapshot) -> OllamaSnapshot {
     let running = build_running_models(&client, &host, ps_resp.models, &prev.installed).await;
     OllamaSnapshot {
         host,
+        display_host,
         lan_endpoint,
         lan_exposed,
         state: prev.state,
@@ -804,13 +828,15 @@ pub async fn fetch_ps_only(prev: OllamaSnapshot) -> OllamaSnapshot {
 }
 
 pub async fn fetch_snapshot() -> OllamaSnapshot {
-    let host = resolve_ollama_host();
+    let host = resolve_ollama_api_host();
+    let display_host = resolve_ollama_display_host();
     let (lan_endpoint, lan_exposed) = resolve_lan_endpoint(&host);
     let client = match build_client() {
         Ok(c) => c,
         Err(e) => {
             return OllamaSnapshot {
                 host,
+                display_host,
                 lan_endpoint,
                 lan_exposed,
                 state: ServiceState::Offline {
@@ -840,6 +866,7 @@ pub async fn fetch_snapshot() -> OllamaSnapshot {
                 let systemd_state = check_systemd_unit().await;
                 return OllamaSnapshot {
                     host,
+                    display_host,
                     lan_endpoint,
                     lan_exposed,
                     state: ServiceState::Offline {
@@ -856,6 +883,7 @@ pub async fn fetch_snapshot() -> OllamaSnapshot {
             let systemd_state = check_systemd_unit().await;
             return OllamaSnapshot {
                 host,
+                display_host,
                 lan_endpoint,
                 lan_exposed,
                 state: ServiceState::Offline {
@@ -877,6 +905,7 @@ pub async fn fetch_snapshot() -> OllamaSnapshot {
             };
             return OllamaSnapshot {
                 host,
+                display_host,
                 lan_endpoint,
                 lan_exposed,
                 state: ServiceState::Offline {
@@ -931,6 +960,7 @@ pub async fn fetch_snapshot() -> OllamaSnapshot {
 
     OllamaSnapshot {
         host,
+        display_host,
         lan_endpoint,
         lan_exposed,
         state: ServiceState::Online { version },
@@ -953,7 +983,7 @@ struct KeepAliveEmbedRequest<'a> {
 }
 
 pub async fn set_keep_alive(model: String, keep_alive: serde_json::Value) -> Result<String, String> {
-    let host = resolve_ollama_host();
+    let host = resolve_ollama_api_host();
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -1006,7 +1036,7 @@ struct WarmLoadRequest<'a> {
 }
 
 pub async fn load_model(model: String) -> Result<String, String> {
-    let host = resolve_ollama_host();
+    let host = resolve_ollama_api_host();
     let client = Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
@@ -1063,7 +1093,7 @@ pub async fn save_model_params(
     params: ModelParams,
     was_running: bool,
 ) -> Result<String, String> {
-    let host = resolve_ollama_host();
+    let host = resolve_ollama_api_host();
     let client = Client::builder()
         .timeout(Duration::from_secs(60))
         .build()

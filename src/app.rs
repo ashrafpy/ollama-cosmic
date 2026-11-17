@@ -26,7 +26,8 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 const APP_ID: &str = "dev.ashraf.CosmicAppletOllama";
-const POPUP_WIDTH: f32 = 400.0;
+const POPUP_WIDTH: f32 = 340.0;
+#[allow(dead_code)]
 const TODAY_BAR_WIDTH: f32 = 344.0;
 const HBAR_MAX_WIDTH: f32 = 224.0;
 const HBAR_HEIGHT: f32 = 6.0;
@@ -199,6 +200,7 @@ pub enum Message {
     ConfigurationSaved(Result<String, String>),
     CopyEndpoint,
     ClearCopiedFeedback(u64),
+    ToggleInstalled,
 }
 
 pub struct OllamaApplet {
@@ -214,6 +216,7 @@ pub struct OllamaApplet {
     last_error: Option<String>,
     endpoint_copied: bool,
     endpoint_copied_seq: u64,
+    show_installed: bool,
 }
 
 impl OllamaApplet {
@@ -230,11 +233,8 @@ impl OllamaApplet {
         }
     }
 
-    fn effective_endpoint(&self) -> &str {
-        self.snapshot
-            .lan_endpoint
-            .as_deref()
-            .unwrap_or(&self.snapshot.host)
+    fn api_endpoint(&self) -> &str {
+        &self.snapshot.display_host
     }
 
     fn symbolic_icon(&self, size: u16) -> cosmic::widget::Icon {
@@ -313,6 +313,7 @@ impl OllamaApplet {
         .into()
     }
 
+    #[allow(dead_code)]
     fn render_today_token_card<'a>(&self) -> Element<'a, Message> {
         let today_date = Local::now().format("%b %d").to_string();
         let today = self.telemetry.today_usage();
@@ -457,25 +458,20 @@ impl OllamaApplet {
             };
             subtitle_parts.push(mem_part);
         }
-        if let Some(ctx) = model.context_length.or(model.max_context_length) {
-            subtitle_parts.push(format!("{} ctx", format_context(ctx)));
-        }
         let subtitle = subtitle_parts.join(" · ");
 
-        let header_info = column([])
-            .spacing(2)
-            .width(Length::Fill)
-            .push(text::heading(&model.display_name))
-            .push(text::caption(subtitle))
-            .push(text::caption(model.params.summary_line()));
-
+        // Row 1: name + ⚙ + Unload
         let title_row = row([])
             .align_y(Alignment::Center)
             .spacing(6)
-            .push(header_info)
+            .push(container(text::heading(&model.display_name)).width(Length::Fill))
             .push(cfg_btn)
             .push(unload_btn);
 
+        // Row 2: specs
+        let specs_row = text::caption(subtitle);
+
+        // Row 3: timer + keep-alive buttons
         let pinned = model.is_pinned_forever(self.now);
         let rem_secs = model
             .expires_at
@@ -486,9 +482,9 @@ impl OllamaApplet {
         let active_1h = !pinned && rem_secs > 15 * 60 + 5 && rem_secs <= 60 * 60 + 5;
 
         let timer_label = if pinned {
-            "Pinned".to_string()
+            "∞".to_string()
         } else {
-            format!("Unloads in {}", model.expiry_summary(self.now))
+            model.expiry_summary(self.now)
         };
 
         let keep_row = row([])
@@ -518,16 +514,16 @@ impl OllamaApplet {
             ))
             .push(keep_alive_btn(
                 &model.name,
-                "Pin ∞",
+                "∞",
                 serde_json::Value::from(-1),
                 pinned,
                 is_busy,
             ));
 
         let card_inner = column([])
-            .spacing(8)
+            .spacing(4)
             .push(title_row)
-            .push(divider::horizontal::light())
+            .push(specs_row)
             .push(keep_row);
 
         solid_card(card_inner)
@@ -586,19 +582,19 @@ impl OllamaApplet {
     fn render_overview<'a>(&'a self) -> Element<'a, Message> {
         let status_subtitle = match &self.snapshot.state {
             ServiceState::Online { version } => {
-                let state_word = if self.snapshot.running.is_empty() {
+                let state = if self.snapshot.running.is_empty() {
                     "Idle".to_string()
                 } else {
                     format!("{} loaded", self.snapshot.running.len())
                 };
                 if version.is_empty() {
-                    format!("Online · {state_word}")
+                    format!("Online · {state}")
                 } else {
-                    format!("Online · v{version} · {state_word}")
+                    format!("Online · v{version} · {state}")
                 }
             }
             ServiceState::Offline { systemd_state, .. } => {
-                format!("Offline · systemd: {systemd_state}")
+                format!("Offline · {systemd_state}")
             }
         };
 
@@ -626,17 +622,32 @@ impl OllamaApplet {
                 .push(refresh_btn),
         );
 
-        let mut body = column([]).spacing(8).padding([8, 0]).push(header);
+        let mut body = column([]).spacing(4).padding([8, 0]).push(header);
         body = body.push(padded_control(divider::horizontal::default()));
 
         if let Some(banner) = &self.status_banner {
             body = body.push(padded_control(text::caption(banner)));
         }
 
-        // Daily token usage card
-        body = body.push(padded_control(self.render_today_token_card()));
-        body = body.push(padded_control(divider::horizontal::light()));
+        // Errors at the top with warning icon
+        if let Some(err) = &self.last_error {
+            let err_row = row([])
+                .align_y(Alignment::Center)
+                .spacing(6)
+                .push(
+                    widget::icon(
+                        icon::from_name("dialog-warning-symbolic")
+                            .size(14)
+                            .symbolic(true)
+                            .into(),
+                    )
+                    .size(14),
+                )
+                .push(text::caption(err).width(Length::Fill));
+            body = body.push(padded_control(err_row));
+        }
 
+        // 1. Models first (primary glance-check)
         match &self.snapshot.state {
             ServiceState::Offline {
                 systemd_state,
@@ -651,57 +662,128 @@ impl OllamaApplet {
             }
             ServiceState::Online { .. } => {
                 if !self.snapshot.running.is_empty() {
-                    let active_header = row([])
-                        .align_y(Alignment::Center)
-                        .push(container(text::caption("LOADED IN MEMORY")).width(Length::Fill))
-                        .push(text::caption(format!("{} active", self.snapshot.running.len())));
-                    body = body.push(padded_control(active_header));
-
-                    let mut active_col = column([]).spacing(8);
+                    let mut active_col = column([]).spacing(4);
                     for running in &self.snapshot.running {
                         active_col = active_col.push(self.render_running_card(running));
                     }
                     body = body.push(padded_control(active_col));
-
-                    if !self.snapshot.installed.is_empty() {
-                        body = body.push(padded_control(divider::horizontal::light()));
-                    }
-                }
-
-                if !self.snapshot.installed.is_empty() {
-                    let installed_header = row([])
-                        .align_y(Alignment::Center)
-                        .push(container(text::caption("INSTALLED MODELS")).width(Length::Fill))
-                        .push(text::caption(format!(
-                            "{} total",
-                            self.snapshot.installed.len()
-                        )));
-                    body = body.push(padded_control(installed_header));
-
-                    let running_names: HashSet<&str> = self
-                        .snapshot
-                        .running
-                        .iter()
-                        .map(|m| m.name.as_str())
-                        .collect();
-
-                    let mut list_col = column([]).spacing(8);
-                    for inst in &self.snapshot.installed {
-                        let is_running = running_names.contains(inst.name.as_str());
-                        list_col = list_col.push(self.render_installed_row(inst, is_running));
-                    }
-
-                    let list_scroll = scrollable(padded_control(list_col)).height(Length::Shrink);
-                    body = body.push(container(list_scroll).max_height(180.0));
+                } else {
+                    let idle_hint =
+                        text::caption("No models loaded · select one below to start");
+                    body = body.push(padded_control(idle_hint));
                 }
             }
         }
 
-        if let Some(err) = &self.last_error {
+        // 2. Token summary (compact one-liner)
+        {
+            let today = self.telemetry.today_usage();
+            let day_total = today.total();
+
+            let token_text = if let Some(live) = &self.telemetry.active_generation {
+                let speed = live
+                    .current_tok_per_sec
+                    .map(|r| format!(" · {r:.1} tok/s"))
+                    .unwrap_or_default();
+                format!(
+                    "Streaming {} tokens{speed}",
+                    format_tokens(live.generated_so_far)
+                )
+            } else if day_total > 0 {
+                let speed_suffix = self
+                    .telemetry
+                    .last_tok_per_sec
+                    .map(|tps| format!(" · {tps:.1} tok/s"))
+                    .unwrap_or_default();
+                format!("{} tokens today{speed_suffix}", format_tokens(day_total))
+            } else {
+                "No activity today".to_string()
+            };
+
             body = body.push(padded_control(divider::horizontal::light()));
-            body = body.push(padded_control(text::caption(format!("Error: {err}"))));
+            let token_row = row([])
+                .align_y(Alignment::Center)
+                .spacing(8)
+                .push(container(text::caption(token_text)).width(Length::Fill))
+                .push(button::text("History").on_press(Message::OpenHistory));
+            body = body.push(padded_control(token_row));
         }
 
+        // 3. Installed models (skip already-loaded, auto-expand if ≤3)
+        if matches!(self.snapshot.state, ServiceState::Online { .. })
+            && !self.snapshot.installed.is_empty()
+        {
+            let running_names: HashSet<&str> = self
+                .snapshot
+                .running
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect();
+            let unloaded: Vec<_> = self
+                .snapshot
+                .installed
+                .iter()
+                .filter(|inst| !running_names.contains(inst.name.as_str()))
+                .collect();
+            let unloaded_count = unloaded.len();
+
+            if unloaded_count > 0 {
+                body = body.push(padded_control(divider::horizontal::light()));
+
+                // If 3 or fewer, show directly — no toggle needed
+                let show_list = unloaded_count <= 3 || self.show_installed;
+
+                if unloaded_count > 3 {
+                    let toggle_label = if self.show_installed {
+                        format!("Hide {} more models", unloaded_count)
+                    } else {
+                        format!("{} more models", unloaded_count)
+                    };
+                    let toggle_icon_name = if self.show_installed {
+                        "pan-up-symbolic"
+                    } else {
+                        "pan-down-symbolic"
+                    };
+
+                    let toggle_row = row([])
+                        .align_y(Alignment::Center)
+                        .spacing(6)
+                        .push(container(text::caption(toggle_label)).width(Length::Fill))
+                        .push(
+                            widget::icon(
+                                icon::from_name(toggle_icon_name)
+                                    .size(14)
+                                    .symbolic(true)
+                                    .into(),
+                            )
+                            .size(14),
+                        );
+
+                    body = body.push(
+                        cosmic::applet::menu_button(toggle_row)
+                            .on_press(Message::ToggleInstalled),
+                    );
+                }
+
+                if show_list {
+                    let mut list_col = column([]).spacing(4);
+                    for inst in &unloaded {
+                        list_col =
+                            list_col.push(self.render_installed_row(inst, false));
+                    }
+
+                    if unloaded_count > 3 {
+                        let list_scroll =
+                            scrollable(padded_control(list_col)).height(Length::Shrink);
+                        body = body.push(container(list_scroll).max_height(180.0));
+                    } else {
+                        body = body.push(padded_control(list_col));
+                    }
+                }
+            }
+        }
+
+        // 4. Endpoint footer
         body = body.push(padded_control(divider::horizontal::light()));
         body = body.push(self.render_endpoint_row());
 
@@ -709,23 +791,11 @@ impl OllamaApplet {
     }
 
     fn render_endpoint_row<'a>(&'a self) -> Element<'a, Message> {
-        let left_label = if self.snapshot.lan_endpoint.is_some() {
-            if self.snapshot.lan_exposed {
-                "WLAN Endpoint"
-            } else {
-                "WLAN (local bind)"
-            }
+        let api_ep = self.api_endpoint();
+        let (label, icon_name) = if self.endpoint_copied {
+            (format!("{api_ep} · Copied!"), "object-select-symbolic")
         } else {
-            "Endpoint"
-        };
-        let endpoint = self.effective_endpoint();
-        let (right_label, icon_name) = if self.endpoint_copied {
-            (
-                format!("{endpoint} · Copied!"),
-                "object-select-symbolic",
-            )
-        } else {
-            (endpoint.to_string(), "edit-copy-symbolic")
+            (api_ep.to_string(), "edit-copy-symbolic")
         };
 
         let copy_icon = icon::from_name(icon_name).size(14).symbolic(true);
@@ -733,8 +803,7 @@ impl OllamaApplet {
             .align_y(Alignment::Center)
             .spacing(6)
             .width(Length::Fill)
-            .push(container(text::caption(left_label)).width(Length::Fill))
-            .push(text::caption(right_label))
+            .push(container(text::caption(label)).width(Length::Fill))
             .push(widget::icon(copy_icon.into()).size(14));
 
         cosmic::applet::menu_button(row_inner)
@@ -898,11 +967,111 @@ impl OllamaApplet {
                 .align_y(Alignment::Center)
                 .spacing(8)
                 .push(button::standard("Back").on_press(Message::BackToOverview))
-                .push(container(text::title4("Daily Token Usage")).width(Length::Fill))
+                .push(container(text::title4("Token Usage")).width(Length::Fill))
                 .push(clear_widget),
         );
 
-        let chart_card = self.render_stacked_bar_chart();
+        // Last 7 days bar chart (strict — no older data)
+        let series = self.telemetry.history_bars_series_strict(7);
+        let max_total = series.iter().map(|(_, _, t)| t.total()).max().unwrap_or(0);
+
+        let chart_header = row([])
+            .align_y(Alignment::Center)
+            .spacing(8)
+            .push(container(text::caption("LAST 7 DAYS")).width(Length::Fill))
+            .push(
+                row([])
+                    .align_y(Alignment::Center)
+                    .spacing(8)
+                    .push(legend_item(INPUT_BAR_COLOR, "Input"))
+                    .push(legend_item(CACHED_BAR_COLOR, "Cached"))
+                    .push(legend_item(OUTPUT_BAR_COLOR, "Output")),
+            );
+
+        let mut bars_col = column([]).spacing(6).width(Length::Fill);
+
+        for (_date_key, short_label, tokens) in series {
+            let day_total = tokens.total();
+            let segments = build_horizontal_segments(&tokens, max_total, HBAR_MAX_WIDTH);
+            let used_w: f32 = segments.iter().map(|(w, _, _)| *w).sum();
+
+            let mut stack_row = row([]).width(Length::Fill).height(Length::Fill);
+            for (seg_w, seg_color, radii) in segments {
+                stack_row = stack_row.push(colored_segment(
+                    Length::Fixed(seg_w),
+                    Length::Fill,
+                    seg_color,
+                    radii,
+                ));
+            }
+            let empty_w = (HBAR_MAX_WIDTH - used_w).max(0.0);
+            if empty_w > 0.0 {
+                stack_row = stack_row.push(
+                    container(row([]))
+                        .width(Length::Fixed(empty_w))
+                        .height(Length::Fill),
+                );
+            }
+
+            let bar_track = container(stack_row)
+                .width(Length::Fixed(HBAR_MAX_WIDTH))
+                .height(Length::Fixed(HBAR_HEIGHT))
+                .class(theme::Container::Custom(Box::new(|_theme| {
+                    cosmic::iced::widget::container::Style {
+                        text_color: None,
+                        background: Some(Color::from_rgba(0.5, 0.5, 0.5, 0.14).into()),
+                        border: Border {
+                            radius: 3.0.into(),
+                            width: 0.0,
+                            color: Color::TRANSPARENT,
+                        },
+                        shadow: Shadow::default(),
+                        icon_color: None,
+                        snap: true,
+                    }
+                })));
+
+            let right_text = if day_total > 0 {
+                format_tokens_compact(day_total)
+            } else {
+                "—".to_string()
+            };
+
+            let day_row = row([])
+                .align_y(Alignment::Center)
+                .spacing(8)
+                .width(Length::Fill)
+                .push(container(text::caption(short_label)).width(Length::Fixed(52.0)))
+                .push(bar_track)
+                .push(
+                    container(text::caption(right_text))
+                        .width(Length::Fill)
+                        .align_x(Horizontal::Right),
+                );
+
+            bars_col = bars_col.push(day_row);
+        }
+
+        // Summary rows
+        let all_time = self.telemetry.all_time_total();
+        let req_all_word = if all_time.requests == 1 { "req" } else { "reqs" };
+
+        let chart_card = solid_card(
+            column([])
+                .spacing(10)
+                .push(chart_header)
+                .push(bars_col)
+                .push(divider::horizontal::light())
+                .push(kv_row(
+                    "All-time",
+                    format!(
+                        "{} · {} {}",
+                        format_tokens(all_time.total()),
+                        all_time.requests,
+                        req_all_word
+                    ),
+                )),
+        );
 
         column([])
             .spacing(8)
@@ -1346,6 +1515,7 @@ impl Application for OllamaApplet {
             last_error: None,
             endpoint_copied: false,
             endpoint_copied_seq: 0,
+            show_installed: false,
         };
         let initial_fetch = Task::perform(ollama::fetch_snapshot(), |snap| {
             Action::App(Message::SnapshotLoaded(snap))
@@ -1723,13 +1893,17 @@ impl Application for OllamaApplet {
                 self.endpoint_copied = true;
                 self.endpoint_copied_seq = self.endpoint_copied_seq.wrapping_add(1);
                 let seq = self.endpoint_copied_seq;
-                let endpoint = self.effective_endpoint().to_string();
+                let endpoint = self.api_endpoint().to_string();
                 let iced_clip = cosmic::iced::clipboard::write(endpoint.clone());
                 let wl_and_reset = Task::perform(
                     copy_to_wayland_clipboard_and_wait(endpoint),
                     move |_| Action::App(Message::ClearCopiedFeedback(seq)),
                 );
                 Task::batch([iced_clip, wl_and_reset])
+            }
+            Message::ToggleInstalled => {
+                self.show_installed = !self.show_installed;
+                Task::none()
             }
             Message::ClearCopiedFeedback(seq) => {
                 if self.endpoint_copied_seq == seq {

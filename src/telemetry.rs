@@ -147,6 +147,27 @@ impl TelemetryState {
         series
     }
 
+    /// Like `history_bars_series` but strictly returns only the last N days (no older tail).
+    pub fn history_bars_series_strict(&self, days: usize) -> Vec<(String, String, DailyTokens)> {
+        let count = days.max(1);
+        let today = Local::now().date_naive();
+        let mut series = Vec::with_capacity(count);
+
+        for offset in 0..count {
+            let date = today - chrono::Duration::days(offset as i64);
+            let key = date.format("%Y-%m-%d").to_string();
+            let short_label = if offset == 0 {
+                "Today".to_string()
+            } else {
+                format!("{} {:02}", month_abbrev(date.month()), date.day())
+            };
+            let tokens = self.store.days.get(&key).cloned().unwrap_or_default();
+            series.push((key, short_label, tokens));
+        }
+
+        series
+    }
+
     /// Ingest a single `journalctl -o json` line.
     pub fn ingest_json_line(&mut self, json_line: &str) -> IngestOutcome {
         let trimmed = json_line.trim();
