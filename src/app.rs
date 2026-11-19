@@ -4,16 +4,16 @@ use crate::ollama::{
 };
 use crate::telemetry::{
     self, format_tokens, format_tokens_compact, DailyTokens, IngestOutcome, TelemetryEvent,
-    TelemetryState, UsageStore,
+    TelemetryState,
 };
 use chrono::{DateTime, Local, Utc};
 use cosmic::app::{Core, Task};
 use cosmic::applet::cosmic_panel_config::PanelAnchor;
 use cosmic::applet::padded_control;
 use cosmic::iced::alignment::{Alignment, Horizontal, Vertical};
-use cosmic::iced::platform_specific::shell::commands::popup::{destroy_popup, get_popup};
 use cosmic::iced::window::Id;
 use cosmic::iced::{Border, Color, Length, Limits, Shadow, Subscription};
+use cosmic::surface::action::{app_popup, destroy_popup};
 use cosmic::theme;
 use cosmic::widget::{
     self, autosize, button, column, container, divider, icon, row, scrollable, slider, text,
@@ -29,7 +29,7 @@ const APP_ID: &str = "dev.ashraf.CosmicAppletOllama";
 const POPUP_WIDTH: f32 = 340.0;
 #[allow(dead_code)]
 const TODAY_BAR_WIDTH: f32 = 344.0;
-const HBAR_MAX_WIDTH: f32 = 224.0;
+const HBAR_MAX_WIDTH: f32 = 160.0;
 const HBAR_HEIGHT: f32 = 6.0;
 const INPUT_BAR_COLOR: Color = Color::from_rgb(0.24, 0.73, 0.78);
 const CACHED_BAR_COLOR: Color = Color::from_rgb(0.60, 0.47, 0.95);
@@ -44,7 +44,6 @@ static POPUP_AUTOSIZE_ID: LazyLock<widget::Id> =
 #[derive(Debug, Clone)]
 pub struct ConfigDraft {
     pub source_model: String,
-    pub display_name: String,
     pub max_context: Option<u64>,
     pub was_running: bool,
     pub loading_params: bool,
@@ -68,7 +67,6 @@ impl ConfigDraft {
         params: &ModelParams,
     ) -> Self {
         Self {
-            display_name: ollama::compact_model_name(&source_model),
             source_model,
             max_context,
             was_running,
@@ -163,7 +161,7 @@ impl ConfigDraft {
 #[derive(Debug, Clone)]
 pub enum PopupView {
     Overview,
-    History { confirm_clear: bool },
+    History,
     Configure(ConfigDraft),
 }
 
@@ -178,9 +176,6 @@ pub enum Message {
     TelemetryStreamEvent(TelemetryEvent),
     UsageStoreSaved,
     OpenHistory,
-    RequestClearHistory,
-    ConfirmClearHistory,
-    HistoryCleared(UsageStore),
     BackToOverview,
     TickNow,
     UnloadModel(String),
@@ -955,20 +950,12 @@ impl OllamaApplet {
         )
     }
 
-    fn render_history<'a>(&'a self, confirm_clear: bool) -> Element<'a, Message> {
-        let clear_widget: Element<'a, Message> = if confirm_clear {
-            button::destructive("Confirm Clear").on_press(Message::ConfirmClearHistory).into()
-        } else {
-            button::text("Clear").on_press(Message::RequestClearHistory).into()
-        };
-
+    fn render_history<'a>(&'a self) -> Element<'a, Message> {
         let header = padded_control(
             row([])
                 .align_y(Alignment::Center)
                 .spacing(8)
-                .push(button::standard("Back").on_press(Message::BackToOverview))
-                .push(container(text::title4("Token Usage")).width(Length::Fill))
-                .push(clear_widget),
+                .push(button::standard("Back").on_press(Message::BackToOverview)),
         );
 
         // Last 7 days bar chart (strict — no older data)
@@ -1088,13 +1075,7 @@ impl OllamaApplet {
                 .align_y(Alignment::Center)
                 .spacing(8)
                 .push(button::standard("Back").on_press(Message::BackToOverview))
-                .push(
-                    column([])
-                        .spacing(1)
-                        .width(Length::Fill)
-                        .push(text::title4(format!("Configure {}", draft.display_name)))
-                        .push(text::caption(&draft.source_model)),
-                ),
+                .push(container(text::caption(&draft.source_model)).width(Length::Fill)),
         );
 
         if draft.loading_params {
@@ -1558,7 +1539,7 @@ impl Application for OllamaApplet {
                 if let Some(p) = self.popup.take() {
                     self.view_mode = PopupView::Overview;
                     self.status_banner = None;
-                    destroy_popup(p)
+                    cosmic::task::message(Action::Surface(destroy_popup(p)))
                 } else {
                     let Some(main_id) = self.core.main_window_id() else {
                         return Task::none();
@@ -1570,20 +1551,26 @@ impl Application for OllamaApplet {
                     self.last_error = None;
                     self.endpoint_copied = false;
                     self.now = Utc::now();
-                    let mut popup_settings = self.core.applet.get_popup_settings(
-                        main_id,
-                        new_id,
-                        None,
-                        None,
-                        None,
-                    );
-                    popup_settings.positioner.size_limits = Limits::NONE
-                        .max_width(POPUP_WIDTH)
-                        .min_width(POPUP_WIDTH)
-                        .min_height(120.0)
-                        .max_height(1000.0);
 
-                    let open_task = get_popup(popup_settings);
+                    let open_task = cosmic::task::message(Action::Surface(app_popup::<Self>(
+                        |_| Default::default(),
+                        move |state: &mut Self| {
+                            let mut popup_settings = state.core.applet.get_popup_settings(
+                                main_id,
+                                new_id,
+                                None,
+                                None,
+                                None,
+                            );
+                            popup_settings.positioner.size_limits = Limits::NONE
+                                .max_width(POPUP_WIDTH)
+                                .min_width(POPUP_WIDTH)
+                                .min_height(120.0)
+                                .max_height(1000.0);
+                            popup_settings
+                        },
+                        None,
+                    )));
                     let refresh_task = Task::perform(ollama::fetch_snapshot(), |snap| {
                         Action::App(Message::SnapshotLoaded(snap))
                     });
@@ -1666,31 +1653,7 @@ impl Application for OllamaApplet {
             Message::OpenHistory => {
                 self.last_error = None;
                 self.status_banner = None;
-                self.view_mode = PopupView::History {
-                    confirm_clear: false,
-                };
-                Task::none()
-            }
-            Message::RequestClearHistory => {
-                self.view_mode = PopupView::History {
-                    confirm_clear: true,
-                };
-                Task::none()
-            }
-            Message::ConfirmClearHistory => {
-                let cursor = self.telemetry.store.last_cursor.clone();
-                Task::perform(telemetry::clear_usage_history(cursor), |store| {
-                    Action::App(Message::HistoryCleared(store))
-                })
-            }
-            Message::HistoryCleared(store) => {
-                self.telemetry.store = store;
-                self.telemetry.last_input_tokens = 0;
-                self.telemetry.last_output_tokens = 0;
-                self.telemetry.last_tok_per_sec = None;
-                self.view_mode = PopupView::History {
-                    confirm_clear: false,
-                };
+                self.view_mode = PopupView::History;
                 Task::none()
             }
             Message::BackToOverview => {
@@ -1943,7 +1906,7 @@ impl Application for OllamaApplet {
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
         let inner = match &self.view_mode {
             PopupView::Overview => self.render_overview(),
-            PopupView::History { confirm_clear } => self.render_history(*confirm_clear),
+            PopupView::History => self.render_history(),
             PopupView::Configure(draft) => self.render_configure(draft),
         };
         self.solid_popup_container(inner)
