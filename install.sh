@@ -17,13 +17,15 @@ else
 fi
 
 echo "==> Building $BIN_NAME (release)..."
-"$CARGO_BIN" build --release
+"$CARGO_BIN" build --release --locked
 
+DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
 BIN_DIR="${HOME}/.local/bin"
-APPS_DIR="${HOME}/.local/share/applications"
-ICON_DIR="${HOME}/.local/share/icons/hicolor/scalable/apps"
+APPS_DIR="${DATA_HOME}/applications"
+ICON_DIR="${DATA_HOME}/icons/hicolor/scalable/apps"
+METAINFO_DIR="${DATA_HOME}/metainfo"
 
-mkdir -p "$BIN_DIR" "$APPS_DIR" "$ICON_DIR"
+mkdir -p "$BIN_DIR" "$APPS_DIR" "$ICON_DIR" "$METAINFO_DIR"
 
 echo "==> Installing binary to $BIN_DIR/$BIN_NAME"
 install -Dm755 "target/release/$BIN_NAME" "$BIN_DIR/$BIN_NAME"
@@ -32,20 +34,25 @@ echo "==> Installing symbolic icons to $ICON_DIR/"
 install -Dm644 "res/icons/${APP_ID}-symbolic.svg" "$ICON_DIR/${APP_ID}-symbolic.svg"
 install -Dm644 "res/icons/${APP_ID}-active-symbolic.svg" "$ICON_DIR/${APP_ID}-active-symbolic.svg"
 
+echo "==> Installing metainfo to $METAINFO_DIR/${APP_ID}.metainfo.xml"
+install -Dm644 "res/${APP_ID}.metainfo.xml" "$METAINFO_DIR/${APP_ID}.metainfo.xml"
+
 echo "==> Installing desktop entry to $APPS_DIR/${APP_ID}.desktop"
 sed "s|^Exec=.*|Exec=${BIN_DIR}/${BIN_NAME}|" "res/${APP_ID}.desktop" > "$APPS_DIR/${APP_ID}.desktop"
+chmod 644 "$APPS_DIR/${APP_ID}.desktop"
 
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
 fi
 
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-    gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor" >/dev/null 2>&1 || true
+    gtk-update-icon-cache -f -t "${DATA_HOME}/icons/hicolor" >/dev/null 2>&1 || true
 fi
 
-if pgrep -f "$BIN_NAME" >/dev/null 2>&1; then
+PROC_PATTERN="(^|/)${BIN_NAME}(\$| )"
+if pgrep -f "$PROC_PATTERN" >/dev/null 2>&1; then
     echo "==> Restarting running $BIN_NAME instance..."
-    pkill -f "$BIN_NAME" || true
+    pkill -f "$PROC_PATTERN" || true
 fi
 
 echo ""
